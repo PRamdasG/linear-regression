@@ -1,37 +1,192 @@
-import numpy as np
 import pandas as pd
-from sklearn import linear_model
-import sqlalchemy
-import math
-import pickle
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import ShuffleSplit,cross_val_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.linear_model import Lasso
+from sklearn.tree import DecisionTreeRegressor
+
+df = pd.read_csv("https://raw.githubusercontent.com/codebasics/py/"
+                 "master/DataScience/BangloreHomePrices/model/bengaluru_house_prices.csv")
+pd.set_option('display.max_columns',None)
+# print(df.head())
+# print(df.columns)
+# print(df['area_type'].unique())
+# print(df['area_type'].value_counts())
+
+df2 = df.drop(['area_type','availability','society','balcony'],axis='columns')
+# print(df2.head())
+# print(df2.shape)
+
+'''DATA CLEANING AND HANDLING NA VALUES'''
+# print(df2.isna().sum())
+df2.dropna(inplace=True)
+# print(df2.isna().sum())
+# print(df2.shape)
+'''upto this all the NA values are handled now we are looking for data cleaning'''
+
+'''FEATURE ENGINEERING'''
+df2['bhk'] = df2['size'].apply(lambda x: int(x.split(' ')[0]))
+# print(df2['bhk'].unique())
+# print(df2[df2.bhk > 20])
+# print(df2['total_sqft'].unique())
+
+def is_float(x):
+    try:
+        float(x)
+    except:
+        return False
+    return True
+# print(df2[~df2['total_sqft'].apply(is_float)].head(10))
+# print(df2.head(31))
+def convert_to_num(x):
+    tokens = x.split('-')
+    if len(tokens) == 2:
+        return (float(tokens[0])+float(tokens[1]))/2
+    try:
+        return float(x)
+    except:
+        return None
 
 
-#data preprocessing step:- cleaning the data
-engine = sqlalchemy.create_engine('mysql://root:1234@localhost:3306/pradumnya')
-df = pd.read_sql_table("houseprices",engine)
-# print(df)
-median_bedrooms = math.floor(df.bedroom.median())
+df3 = df2.copy()
+df3['total_sqft']=df3['total_sqft'].apply(convert_to_num)
+# print(df3.loc[31])
+# print(df3.isnull().sum())
 
-# print(median_bedrooms )
-df.bedroom = df.bedroom.fillna(median_bedrooms)
-print(df)
+df4 = df3.copy()
+df4['price_per_sqft'] = df4['price']*100000/df4['total_sqft']
+# print(df4.head())
 
-#linear Regression
-model = linear_model.LinearRegression()
-model.fit(df[['area','bedroom','age']],df.prices)
+# print(df4.location.unique())
+df4.location = df4.location.apply(lambda x: x.strip())
+location_stats = df['location'].value_counts(ascending=False)
+# print(location_stats)
+
+location_stats_less_than_10 = location_stats[location_stats<=10]
+
+df4.location = df4.location.apply(lambda x:'other' if x in location_stats_less_than_10 else x)
+# print(len(df4.location.unique()))
+
+'''Outlier Removal Using Business Logic'''
+df4[df4.total_sqft/df4.bhk < 300]
+# print(len(df4[df4.total_sqft/df4.bhk < 300]))
+'''now to remove this outliers we can use ~'''
+
+df5 = df4[~(df4.total_sqft/df4.bhk < 300)]
+# print(df5.shape)
+
+'''Outlier Removal Using Standard Deviation and Mean'''
+# print(df5.price_per_sqft.describe())
+def remove_pps_outliers(df):
+    df_out = pd.DataFrame()
+    for key, subdf in df.groupby('location'):  #key:names of locations, subdf: table with group of same location
+        m = np.mean(subdf.price_per_sqft)
+        st = np.std(subdf.price_per_sqft)
+        reduced_df = subdf[(subdf.price_per_sqft>(m-st)) & (subdf.price_per_sqft<=(m+st))]
+        df_out = pd.concat([df_out,reduced_df],ignore_index=True)
+    return df_out
+'''whats happening in this loop?
+we have initialised a dataframe,now in the loop there are two variable in which key:names of locations
+and subdf is the sub dataframe which is created by loop according to the sorted names of location
+now we have taken the mean and standard deviation, now as subdf is a sub dataframe then reduced_df is the 
+reduced dataframe in which all subdf's are cancated with all outliars removed from it and then returned '''
+
+df6 = remove_pps_outliers(df5)
+# print(df6.shape)
 
 
-print(model.coef_)
-print(model.intercept_)
-print(model.predict([[3000,3,40]]))
-print(model.predict([[2500,4,5]]))
+def remove_bhk_outliers(df):
+    exclude_indices = np.array([])
+    for location, location_df in df.groupby('location'):
+        bhk_stats = {}
+        for bhk, bhk_df in location_df.groupby('bhk'):
+            bhk_stats[bhk] = {
+                'mean': np.mean(bhk_df.price_per_sqft),
+                'std': np.std(bhk_df.price_per_sqft),
+                'count': bhk_df.shape[0]
+            }
+        for bhk, bhk_df in location_df.groupby('bhk'):
+            stats = bhk_stats.get(bhk-1)
+            if stats and stats['count']>5:
+                exclude_indices = np.append(exclude_indices, bhk_df[bhk_df.price_per_sqft<(stats['mean'])].index.values)
+    return df.drop(exclude_indices,axis='index')
+df7 = remove_bhk_outliers(df6)
+# df8 = df7.copy()
+# print(df7.shape)
+
+df8 = df7.drop(['size','price_per_sqft'],axis='columns')
+# print(df8)
+
+dummies = pd.get_dummies(df8.location)
+# print(dummies.head())
+
+df9 = pd.concat([df8,dummies.drop('other',axis='columns')],axis='columns')
+# print(df9.head())
+
+df10  = df9.drop(['location'],axis='columns')
 
 
-# pickling the model for future use
-with open('model_pickle','wb') as f:
-    pickle.dump(model,f)
+X = df10.drop(['price'],axis='columns')
 
-with open('model_pickle','rb') as f:
-    mp = pickle.load(f)
+y = df10.price
 
-print(mp.predict([[3000,1,90]]))
+X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.2,random_state=10)
+
+model = LinearRegression()
+model.fit(X_train,y_train)
+# print(model.score(X_test,y_test))
+
+cv = ShuffleSplit(n_splits=5, test_size=0.2, random_state=0)
+# print(cross_val_score(LinearRegression(), X, y, cv=cv))
+'''Find best model using GridSearchCV'''
+
+def find_best_model_using_gridsearchcv(X,y):
+    algos = {
+        'linear_regression' : {
+            'model': LinearRegression(),
+            'params': {
+                'normalize': [True, False]
+            }
+        },
+        'lasso': {
+            'model': Lasso(),
+            'params': {
+                'alpha': [1,2],
+                'selection': ['random', 'cyclic']
+            }
+        },
+        'decision_tree': {
+            'model': DecisionTreeRegressor(),
+            'params': {
+                'criterion' : ['mse','friedman_mse'],
+                'splitter': ['best','random']
+            }
+        }
+    }
+    scores = []
+    cv = ShuffleSplit(n_splits=5, test_size=0.2, random_state=0)
+    for algo_name, config in algos.items():
+        gs =  GridSearchCV(config['model'], config['params'], cv=cv, return_train_score=False)
+        gs.fit(X,y)
+        scores.append({
+            'model': algo_name,
+            'best_score': gs.best_score_,
+            'best_params': gs.best_params_
+        })
+
+    return pd.DataFrame(scores,columns=['model','best_score','best_params'])
+# print(find_best_model_using_gridsearchcv(X,y))
+def predict_price(location,sqft,bath,bhk):
+    loc_index = np.where(X.columns==location)[0][0]
+
+    x = np.zeros(len(X.columns))
+    x[0] = sqft
+    x[1] = bath
+    x[2] = bhk
+    if loc_index >= 0:
+        x[loc_index] = 1
+
+    return model.predict([x])[0]
+print(predict_price('Indira Nagar',1000, 3, 3)," lakh rupees")
